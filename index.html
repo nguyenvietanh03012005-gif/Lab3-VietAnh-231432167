@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Runner Monitor</title>
+  <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #f4f6fa; --card: #ffffff; --text: #1d2433; --muted: #6b7385;
+      --border: #e3e7ef; --accent: #2563eb; --good: #16a34a; --warn: #d97706; --bad: #dc2626;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0f141c; --card: #171e29; --text: #e7ebf3; --muted: #95a0b4; --border: #263042; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+           background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 16px 40px; }
+    header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+    h1 { font-size: 22px; margin: 0; }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px;
+            font-size: 13px; border: 1px solid var(--border); background: var(--card); }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+    .dot.on { background: var(--good); } .dot.off { background: var(--bad); }
+
+    .banner { margin: 16px 0 0; padding: 12px 16px; border-radius: 10px; font-weight: 600; display: none; }
+    .banner.show { display: block; }
+    .banner.bad  { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); border: 1px solid var(--bad); }
+
+    .grid { display: grid; gap: 14px; margin-top: 16px; }
+    .cards { grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+    .card .label { color: var(--muted); font-size: 13px; }
+    .card .value { font-size: 34px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+    .card .unit { font-size: 15px; font-weight: 500; color: var(--muted); margin-left: 4px; }
+    .card .time { color: var(--muted); font-size: 12px; margin-top: 6px; }
+
+    .controls { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .ctrl { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .ctrl .state { font-size: 13px; color: var(--muted); margin-top: 4px; }
+    button { font: inherit; font-weight: 600; padding: 10px 18px; border-radius: 10px; cursor: pointer;
+             border: 1px solid var(--border); background: var(--bg); color: var(--text); min-width: 96px; }
+    button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.alert.on { background: var(--bad); border-color: var(--bad); }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    .charts { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .chart-box { position: relative; height: 240px; }
+    h2 { font-size: 15px; margin: 0 0 10px; }
+
+    details { margin-top: 18px; font-size: 13px; color: var(--muted); }
+    details input { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border);
+                    background: var(--card); color: var(--text); width: min(100%, 340px); }
+    #log { font-family: ui-monospace, Consolas, monospace; font-size: 12px; max-height: 160px; overflow: auto;
+           background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 8px; margin-top: 8px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Giám sát người chạy (Runner)</h1>
+      <div class="sub">ESP32 + BMP180 · FreeRTOS · MQTT (broker.hivemq.com)</div>
+    </div>
+    <div style="display:flex; gap:8px; flex-wrap:wrap">
+      <span class="pill"><span id="dotBroker" class="dot"></span><span id="txtBroker">Broker: đang kết nối…</span></span>
+      <span class="pill"><span id="dotDevice" class="dot"></span><span id="txtDevice">ESP32: chưa rõ</span></span>
+    </div>
+  </header>
+
+  <div id="banner" class="banner bad"></div>
+
+  <section class="grid cards">
+    <div class="card">
+      <div class="label">Nhiệt độ</div>
+      <div class="value"><span id="temperature" class="data-value">--</span><span class="unit">°C</span></div>
+      <div class="time" id="tTemp">Ngưỡng an toàn: 35.0 – 38.0 °C</div>
+    </div>
+    <div class="card">
+      <div class="label">Áp suất khí quyển</div>
+      <div class="value"><span id="pressure" class="data-value">--</span><span class="unit">hPa</span></div>
+      <div class="time">Chuẩn mực nước biển: 1013.25 hPa</div>
+    </div>
+    <div class="card">
+      <div class="label">Độ cao so với mực nước biển</div>
+      <div class="value"><span id="altitude" class="data-value">--</span><span class="unit">m</span></div>
+      <div class="time" id="tUpdate">Chưa có dữ liệu</div>
+    </div>
+  </section>
+
+  <section class="grid controls">
+    <div class="card ctrl">
+      <div><div class="label">Chế độ</div><div class="state" id="stMode">--</div></div>
+      <button id="btnMode">AUTO</button>
+    </div>
+    <div class="card ctrl">
+      <div><div class="label">Đèn LED cảnh báo</div><div class="state" id="stLed">--</div></div>
+      <button id="btnLed" class="alert">LED: OFF</button>
+    </div>
+    <div class="card ctrl">
+      <div><div class="label">Loa (còi) cảnh báo</div><div class="state" id="stBuz">--</div></div>
+      <button id="btnBuzzer" class="alert">Loa: OFF</button>
+    </div>
+  </section>
+
+  <section class="grid charts">
+    <div class="card"><h2>Nhiệt độ theo thời gian (°C)</h2><div class="chart-box"><canvas id="chartTemp"></canvas></div></div>
+    <div class="card"><h2>Độ cao theo thời gian (m)</h2><div class="chart-box"><canvas id="chartAlt"></canvas></div></div>
+  </section>
+
+  <details>
+    <summary>Cấu hình &amp; nhật ký MQTT</summary>
+    <p>Topic gốc (phải trùng TOPIC_BASE trong code ESP32):<br>
+      <input id="baseInput" value="esp32/runner/vietanh"> <button id="btnApply">Áp dụng</button></p>
+    <div id="log"></div>
+  </details>
+</div>
+
+<script>
+  const BROKER_URL = 'wss://broker.hivemq.com:8884/mqtt';
+  const MAX_POINTS = 30;
+  let base = 'esp32/runner/vietanh';
+  try { base = localStorage.getItem('runnerBase') || base; } catch (e) {}
+  document.getElementById('baseInput').value = base;
+
+  const T = () => ({
+    data: `${base}/data`, status: `${base}/status`, online: `${base}/online`,
+    mode: `${base}/cmd/mode`, led: `${base}/cmd/led`, buzzer: `${base}/cmd/buzzer`
+  });
+
+  const state = { mode: 'AUTO', led: false, buzzer: false, alarm: 'NONE' };
+  const $ = id => document.getElementById(id);
+
+  function log(msg) {
+    const el = $('log');
+    const line = document.createElement('div');
+    line.textContent = `${new Date().toLocaleTimeString()}  ${msg}`;
+    el.prepend(line);
+    while (el.childNodes.length > 80) el.removeChild(el.lastChild);
+  }
+
+  function makeChart(id, label, color) {
+    return new Chart($(id), {
+      type: 'line',
+      data: { labels: [], datasets: [{ label, data: [], borderColor: color, backgroundColor: color + '22',
+              fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2 }] },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+                 plugins: { legend: { display: false } },
+                 scales: { x: { ticks: { maxTicksLimit: 6 } }, y: { ticks: { maxTicksLimit: 6 } } } }
+    });
+  }
+  const chartTemp = makeChart('chartTemp', 'Nhiệt độ (°C)', '#dc2626');
+  const chartAlt  = makeChart('chartAlt',  'Độ cao (m)',    '#2563eb');
+
+  function pushPoint(chart, label, value) {
+    chart.data.labels.push(label);
+    chart.data.datasets[0].data.push(value);
+    if (chart.data.labels.length > MAX_POINTS) {
+      chart.data.labels.shift();
+      chart.data.datasets[0].data.shift();
+    }
+    chart.update('none');
+  }
+
+  const ALARM_TEXT = {
+    TEMP_HIGH: 'Nhiệt độ QUÁ NGƯỠNG (> 38 °C)',
+    TEMP_LOW:  'Nhiệt độ DƯỚI NGƯỠNG (< 35 °C)',
+    ALT:       'Độ cao thay đổi ĐỘT NGỘT'
+  };
+
+  function renderStatus() {
+    const manual = state.mode === 'MANUAL';
+    $('btnMode').textContent = manual ? 'MANUAL' : 'AUTO';
+    $('btnMode').classList.toggle('on', manual);
+    $('stMode').textContent = manual ? 'Điều khiển tay từ Web' : 'Tự động theo ngưỡng cảnh báo';
+
+    $('btnLed').textContent = `LED: ${state.led ? 'ON' : 'OFF'}`;
+    $('btnLed').classList.toggle('on', state.led);
+    $('stLed').textContent = state.led ? 'Đang bật' : 'Đang tắt';
+
+    $('btnBuzzer').textContent = `Loa: ${state.buzzer ? 'ON' : 'OFF'}`;
+    $('btnBuzzer').classList.toggle('on', state.buzzer);
+    $('stBuz').textContent = state.buzzer ? 'Đang kêu' : 'Im lặng';
+
+    const alarms = state.alarm === 'NONE' ? [] : state.alarm.split(' ');
+    const banner = $('banner');
+    if (alarms.length) {
+      banner.textContent = 'CẢNH BÁO: ' + alarms.map(a => ALARM_TEXT[a] || a).join(' · ');
+      banner.classList.add('show');
+    } else {
+      banner.classList.remove('show');
+    }
+  }
+
+  function setDot(id, on) {
+    $(id).classList.toggle('on', on === true);
+    $(id).classList.toggle('off', on === false);
+  }
+
+  let client = null;
+
+  function connect() {
+    if (client) client.end(true);
+    client = mqtt.connect(BROKER_URL, {
+      clientId: 'web-runner-' + Math.random().toString(16).slice(2, 10),
+      clean: true, reconnectPeriod: 3000, connectTimeout: 10000
+    });
+
+    client.on('connect', () => {
+      setDot('dotBroker', true); $('txtBroker').textContent = 'Broker: đã kết nối';
+      const t = T();
+      client.subscribe([t.data, t.status, t.online], { qos: 0 });
+      log(`Đã kết nối broker, subscribe ${base}/{data,status,online}`);
+    });
+    client.on('reconnect', () => { $('txtBroker').textContent = 'Broker: đang kết nối lại…'; });
+    client.on('close', () => { setDot('dotBroker', false); $('txtBroker').textContent = 'Broker: mất kết nối'; });
+    client.on('error', err => log('Lỗi MQTT: ' + err.message));
+
+    client.on('message', (topic, payload) => {
+      const text = payload.toString();
+      const t = T();
+      if (topic === t.online) {
+        const on = text === '1';
+        setDot('dotDevice', on);
+        $('txtDevice').textContent = on ? 'ESP32: online' : 'ESP32: offline';
+        return;
+      }
+      let obj;
+      try { obj = JSON.parse(text); } catch (e) { log('JSON lỗi: ' + text); return; }
+
+      if (topic === t.data) {
+        $('temperature').textContent = obj.temperature.toFixed(2);
+        $('pressure').textContent    = obj.pressure.toFixed(2);
+        $('altitude').textContent    = obj.altitude.toFixed(2);
+        const now = new Date().toLocaleTimeString();
+        $('tUpdate').textContent = 'Cập nhật: ' + now;
+        pushPoint(chartTemp, now, obj.temperature);
+        pushPoint(chartAlt,  now, obj.altitude);
+      } else if (topic === t.status) {
+        Object.assign(state, obj);
+        renderStatus();
+        log('Trạng thái: ' + text);
+      }
+    });
+  }
+
+  function publish(topic, msg) {
+    if (!client || !client.connected) { log('Chưa kết nối broker'); return; }
+    client.publish(topic, msg, { qos: 0 });
+    log(`Gửi ${topic} = ${msg}`);
+  }
+
+  $('btnMode').onclick   = () => publish(T().mode,   state.mode === 'MANUAL' ? 'AUTO' : 'MANUAL');
+  $('btnLed').onclick    = () => publish(T().led,    state.led ? 'OFF' : 'ON');
+  $('btnBuzzer').onclick = () => publish(T().buzzer, state.buzzer ? 'OFF' : 'ON');
+  $('btnApply').onclick  = () => {
+    base = $('baseInput').value.trim().replace(/\/+$/, '') || base;
+    try { localStorage.setItem('runnerBase', base); } catch (e) {}
+    connect();
+  };
+
+  renderStatus();
+  connect();
+</script>
+</body>
+</html>
