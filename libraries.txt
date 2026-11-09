@@ -1,0 +1,4 @@
+# Wokwi Library List
+PubSubClient
+Adafruit BMP085 Library
+Adafruit BusIO
